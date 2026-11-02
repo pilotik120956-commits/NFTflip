@@ -123,7 +123,8 @@ class Scanner:
         async with self._scan_lock:
             report, offers = await self._run(queries, notify=False)
 
-        if user is None or not offers:
+        if user is None:
+            report.offers = 0
             return report, []
 
         budget = float(user.get("budget_ton") or 0)
@@ -134,6 +135,7 @@ class Scanner:
             if offer.buy_cost <= budget and offer.margin_pct >= min_margin
         ]
         filtered.sort(key=lambda offer: (offer.profit, offer.margin_pct), reverse=True)
+        report.offers = len(filtered)
         return report, filtered[: max(1, limit)]
 
     # --- internals -------------------------------------------------------------
