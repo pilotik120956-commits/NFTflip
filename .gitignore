@@ -1,0 +1,30 @@
+# Secrets and runtime files — never commit these
+.env
+.env.*
+!.env.example
+*.session
+*.session-journal
+
+# Data and databases
+data/
+*.sqlite3
+*.sqlite3-shm
+*.sqlite3-wal
+logs/
+*.log
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+.venv/
+venv/
+env/
+
+# Editors / OS
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
