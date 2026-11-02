@@ -58,9 +58,8 @@ async def run_bot(settings: Settings | None = None) -> None:
     adapters = build_adapters(settings)
     scanner = Scanner(settings, db, adapters)
     rates = TonRate(settings)
-    ctx = AppContext(settings=settings, db=db, scanner=scanner, rates=rates)
-
     bot = Bot(settings.bot_token, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
+    ctx = AppContext(settings=settings, db=db, scanner=scanner, rates=rates, bot=bot)
     dispatcher = Dispatcher(storage=MemoryStorage())
 
     dispatcher.message.middleware(AccessMiddleware(settings.allowed_user_ids))

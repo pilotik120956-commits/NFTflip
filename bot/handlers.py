@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
+import random
 import time
 
 from aiogram import F, Router
@@ -13,7 +15,7 @@ from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import CallbackQuery, Message, User
 
 from bot.context import AppContext
-from bot.delivery import send_offer_card
+from bot.delivery import send_listing_card, send_offer_card
 from bot.formatting import (
     calc_text,
     esc,
@@ -204,6 +206,26 @@ async def _say(target: Message | CallbackQuery, text: str, kb=None) -> None:
         await target.answer(text, reply_markup=kb)
 
 
+async def _random_listing(ctx: AppContext, tg_id: int):
+    """Fetch one random listing from the user's watches for a sample card."""
+    watches = await ctx.db.list_watch(tg_id)
+    if not watches:
+        return None
+    for row in watches:
+        collection = row["collection"]
+        model = row.get("model") or None
+        for _name, adapter in ctx.scanner.adapters.items():
+            if not getattr(adapter, "enabled", True):
+                continue
+            try:
+                listings = await adapter.search(collection, model, 20, pages=1)
+            except Exception:  # noqa: BLE001
+                continue
+            if listings:
+                return random.choice(listings)
+    return None
+
+
 async def _do_search(target: Message | CallbackQuery, ctx: AppContext, tg: User | None) -> None:
     """Manual search over the user's own watches, with photo cards and buy links."""
     if tg is None:
@@ -238,52 +260,83 @@ async def _do_search(target: Message | CallbackQuery, ctx: AppContext, tg: User 
     _search_started[tg_id] = now
     await _say(
         target,
-        f"🔍 Глибокий пошук: {len(watches)} підписок, до {ctx.settings.manual_search_pages} сторінок на Portals, Tonnel і MRKT…\n"
+        f"🔍 Запускаю глибокий пошук: {len(watches)} підписок, до {ctx.settings.manual_search_pages} сторінок на Portals, Tonnel і MRKT…\n"
+        "Буду шукати кілька циклів поспіль (до 3) і надсилати пропозиції, коли знайду.\n"
         "Це може зайняти кілька хвилин — не закривайте чат.",
     )
 
-    try:
-        report, offers = await ctx.scanner.scan_for_user(tg_id)
-    except Exception as exc:  # noqa: BLE001 - report instead of leaving the user waiting
-        log.exception("Manual search failed for %s", tg_id)
-        await _say(target, f"⚠️ Пошук не вдався: {esc(exc)}", back_kb())
-        return
-
     budget = float(user.get("budget_ton") or 0)
     margin = float(user.get("min_margin_pct") or 0)
+    rate = await ctx.rates.get()
+    display = user.get("display_currency") or "both"
 
-    if not offers:
+    found_offers: list = []
+    seen_keys: set[str] = set()
+    last_report = None
+
+    for cycle in range(3):
+        try:
+            report, offers = await ctx.scanner.scan_for_user(tg_id)
+        except Exception as exc:  # noqa: BLE001 - report instead of leaving the user waiting
+            log.exception("Manual search failed for %s", tg_id)
+            await _say(target, f"⚠️ Пошук не вдався: {esc(exc)}", back_kb())
+            return
+        last_report = report
+        new_offers = [o for o in offers if o.offer_key not in seen_keys]
+        for offer in new_offers:
+            seen_keys.add(offer.offer_key)
+            found_offers.append(offer)
+            await send_offer_card(
+                ctx.bot,
+                tg_id,
+                offer,
+                display=display,
+                rate=rate,
+                discount_pct=ctx.settings.resale_discount_pct,
+            )
+        if new_offers:
+            await _say(
+                target,
+                f"🚀 Цикл {cycle + 1}/3: знайдено {len(new_offers)} нових пропозицій.",
+            )
+        if cycle < 2:
+            await asyncio.sleep(5)
+
+    if found_offers:
         await _say(
             target,
-            report_text(report)
-            + "\n\n😕 Зараз вигідних пропозицій немає.\n"
-            f"Ваші умови: бюджет <b>{fmt_ton(budget)} TON</b>, "
-            f"маржа від <b>{margin:g}%</b>.\n"
-            "Спробуйте пізніше або змініть /budget і /threshold.",
+            f"✅ <b>Пошук завершено.</b> Всього знайдено {len(found_offers)} пропозицій.\n"
+            f"Бюджет: <b>{fmt_ton(budget)} TON</b> · маржа від <b>{margin:g}%</b>\n"
+            f"Перевірено лотів: {last_report.listings if last_report else 0} · "
+            f"{last_report.duration_sec if last_report else 0:.1f} с",
             back_kb(),
         )
         return
 
-    await _say(
-        target,
-        f"🚀 <b>Знайдено {len(offers)} вигідних пропозицій</b>\n\n"
-        f"Бюджет: <b>{fmt_ton(budget)} TON</b> · маржа від <b>{margin:g}%</b>\n"
-        f"Перевірено лотів: {report.listings} · {report.duration_sec:.1f} с\n\n"
-        "Нижче — фото подарунка, назва з номером і пряме посилання на купівлю "
-        "саме цього лота.",
-        back_kb(),
-    )
-
-    rate = await ctx.rates.get()
-    display = user.get("display_currency") or "both"
-    for offer in offers:
-        await send_offer_card(
-            target.bot,
-            tg_id,
-            offer,
-            display=display,
-            rate=rate,
-            discount_pct=ctx.settings.resale_discount_pct,
+    # No arbitrage found: send one random gift as a sample so the user sees a card.
+    sample = await _random_listing(ctx, tg_id)
+    if sample is not None:
+        await _say(
+            target,
+            "😕 Вигідних арбітражів зараз немає, але для зразка надсилаю один подарунок "
+            "з ваших підписок — фото, назва/номер і пряме посилання на купівлю.",
+        )
+        await send_listing_card(ctx.bot, tg_id, sample)
+        await _say(
+            target,
+            "Спробуйте пізніше або змініть /budget і /threshold. "
+            "Фоновий скан також працює автоматично кожні 2 хв.",
+            back_kb(),
+        )
+    else:
+        await _say(
+            target,
+            (report_text(last_report) if last_report else "")
+            + "\n\n😕 Зараз вигідних пропозицій немає і не вдалося отримати зразок.\n"
+            f"Ваші умови: бюджет <b>{fmt_ton(budget)} TON</b>, "
+            f"маржа від <b>{margin:g}%</b>.\n"
+            "Спробуйте пізніше або змініть /budget і /threshold.",
+            back_kb(),
         )
 
 
