@@ -151,10 +151,18 @@ class MrktAdapter(BaseAdapter):
         names = [str(c.get("name") or c.get("title")) for c in self._collections if c.get("name") or c.get("title")]
         return sorted(dict.fromkeys(names), key=str.casefold)
 
-    async def search(self, collection: str, model: str | None = None, limit: int = 30) -> list[Listing]:
+    async def search(
+        self,
+        collection: str,
+        model: str | None = None,
+        limit: int = 30,
+        *,
+        pages: int = 1,
+    ) -> list[Listing]:
         resolved = await self.resolve_name(collection)
+        per_page = max(1, min(int(limit), 50))
         body = {
-            "count": max(1, min(int(limit), 50)),
+            "count": per_page,
             "cursor": "",
             "collectionNames": [resolved],
             "modelNames": [strip_rarity(model)] if model else [],
@@ -179,13 +187,40 @@ class MrktAdapter(BaseAdapter):
             "lowToHigh": True,
             "query": None,
         }
-        data = await self._request("POST", "/gifts/saling", json=body)
-        gifts = data.get("gifts") if isinstance(data, dict) else data
+
         out: list[Listing] = []
-        for item in gifts or []:
-            parsed = self._parse_item(item)
-            if parsed is not None:
-                out.append(parsed)
+        seen: set[str] = set()
+        cursor: Any = ""
+        page = 0
+
+        while page < max(1, pages):
+            body["cursor"] = cursor
+            data = await self._request("POST", "/gifts/saling", json=body)
+            if isinstance(data, dict):
+                gifts = data.get("gifts") or data.get("data") or []
+                cursor = (
+                    data.get("cursor")
+                    or data.get("nextCursor")
+                    or data.get("next_cursor")
+                    or ""
+                )
+            else:
+                gifts = data or []
+                cursor = ""
+            gifts = gifts or []
+
+            fresh = 0
+            for item in gifts:
+                parsed = self._parse_item(item)
+                if parsed is not None and parsed.id not in seen:
+                    seen.add(parsed.id)
+                    out.append(parsed)
+                    fresh += 1
+
+            if len(gifts) < per_page or not cursor or fresh == 0:
+                break
+            page += 1
+
         return out
 
     def _parse_item(self, item: dict[str, Any]) -> Listing | None:

@@ -50,7 +50,14 @@ class TonnelAdapter(BaseAdapter):
             "User-Agent": self.user_agent(),
         }
 
-    async def search(self, collection: str, model: str | None = None, limit: int = 30) -> list[Listing]:
+    async def search(
+        self,
+        collection: str,
+        model: str | None = None,
+        limit: int = 30,
+        *,
+        pages: int = 1,
+    ) -> list[Listing]:
         flt: dict[str, Any] = {
             "price": {"$exists": True},
             "buyer": {"$exists": False},
@@ -64,38 +71,51 @@ class TonnelAdapter(BaseAdapter):
             if model_filter:
                 flt["model"] = model_filter
 
-        payload = {
-            "page": 1,
-            "limit": max(1, min(int(limit), 30)),
-            "sort": SORT_PRICE_ASC,
-            "filter": json.dumps(flt, separators=(",", ":")),
-            "ref": 0,
-            "price_range": 0,
-            "user_auth": "",
-        }
-
-        await self._wait_slot()
-        response = await self.http.request(
-            "POST", f"{self.base}/pageGifts", json=payload, headers=self._headers()
-        )
-        if response.status == 403:
-            raise MarketRateLimited("Tonnel: Cloudflare/403", 5.0)
-        if response.status == 429:
-            raise MarketRateLimited("Tonnel: rate limited", 3.0)
-        if response.status >= 400:
-            raise MarketError(response.status, f"Tonnel pageGifts: {response.text[:200]}")
-
-        data = response.json()
-        if isinstance(data, dict) and data.get("status") == "error":
-            raise MarketError(response.status, f"Tonnel: {data.get('message') or data}")
-        if not isinstance(data, list):
-            raise MarketError(response.status, f"Tonnel: unexpected response {str(data)[:160]}")
-
+        per_page = max(1, min(int(limit), 30))
         out: list[Listing] = []
-        for item in data:
-            parsed = self._parse_item(item)
-            if parsed is not None:
-                out.append(parsed)
+        seen: set[str] = set()
+        page = 1
+
+        while page <= max(1, pages):
+            payload = {
+                "page": page,
+                "limit": per_page,
+                "sort": SORT_PRICE_ASC,
+                "filter": json.dumps(flt, separators=(",", ":")),
+                "ref": 0,
+                "price_range": 0,
+                "user_auth": "",
+            }
+
+            await self._wait_slot()
+            response = await self.http.request(
+                "POST", f"{self.base}/pageGifts", json=payload, headers=self._headers()
+            )
+            if response.status == 403:
+                raise MarketRateLimited("Tonnel: Cloudflare/403", 5.0)
+            if response.status == 429:
+                raise MarketRateLimited("Tonnel: rate limited", 3.0)
+            if response.status >= 400:
+                raise MarketError(response.status, f"Tonnel pageGifts: {response.text[:200]}")
+
+            data = response.json()
+            if isinstance(data, dict) and data.get("status") == "error":
+                raise MarketError(response.status, f"Tonnel: {data.get('message') or data}")
+            if not isinstance(data, list):
+                raise MarketError(response.status, f"Tonnel: unexpected response {str(data)[:160]}")
+
+            fresh = 0
+            for item in data:
+                parsed = self._parse_item(item)
+                if parsed is not None and parsed.id not in seen:
+                    seen.add(parsed.id)
+                    out.append(parsed)
+                    fresh += 1
+
+            if len(data) < per_page or fresh == 0:
+                break
+            page += 1
+
         return out
 
     def _parse_item(self, item: dict[str, Any]) -> Listing | None:

@@ -238,8 +238,8 @@ async def _do_search(target: Message | CallbackQuery, ctx: AppContext, tg: User 
     _search_started[tg_id] = now
     await _say(
         target,
-        f"🔍 Сканую {len(watches)} підписок на Portals, Tonnel і MRKT…\n"
-        "Це може зайняти до хвилини.",
+        f"🔍 Глибокий пошук: {len(watches)} підписок, до {ctx.settings.manual_search_pages} сторінок на Portals, Tonnel і MRKT…\n"
+        "Це може зайняти кілька хвилин — не закривайте чат.",
     )
 
     try:

@@ -78,51 +78,74 @@ class PortalsAdapter(BaseAdapter):
         names = [str(c.get("name")) for c in self._collections if c.get("name")]
         return sorted(dict.fromkeys(names), key=str.casefold)
 
-    async def search(self, collection: str, model: str | None = None, limit: int = 30) -> list[Listing]:
+    async def search(
+        self,
+        collection: str,
+        model: str | None = None,
+        limit: int = 30,
+        *,
+        pages: int = 1,
+    ) -> list[Listing]:
         info = await self.resolve(collection)
         if info is None:
             # The collection may exist only on another marketplace; that is not a health failure.
             log.info("Portals: collection %r not found, skipping", collection)
             return []
 
-        params: list[tuple[str, str]] = [
-            ("offset", "0"),
-            ("limit", str(max(1, min(limit, 50)))),
-            ("sort_by", SORT_PRICE_ASC),
-            ("collection_ids", str(info.get("id"))),
-        ]
-        if model:
-            params.append(("filter_by_models", strip_rarity(model)))
-        params += [
-            ("status", "listed"),
-            ("exclude_bundled", "true"),
-            ("premarket_status", "all"),
-        ]
-
-        for attempt in range(2):
-            await self._wait_slot()
-            response = await self.http.request(
-                "GET", f"{self.base}/nfts/search", params=params, headers=self._headers()
-            )
-            if response.status == 429 and attempt == 0:
-                await asyncio.sleep(2.0)
-                continue
-            break
-
-        if response.status == 429:
-            raise MarketRateLimited("Portals: search rate limited", 2.0)
-        if response.status in (401, 403):
-            raise MarketError(response.status, f"Portals blocked the request: {response.text[:160]}")
-        if response.status >= 400:
-            raise MarketError(response.status, f"Portals /nfts/search: {response.text[:200]}")
-
-        data = response.json() or {}
-        results = data.get("results") if isinstance(data, dict) else []
+        per_page = max(1, min(limit, 50))
         out: list[Listing] = []
-        for item in results or []:
-            parsed = self._parse_item(item, info)
-            if parsed is not None:
-                out.append(parsed)
+        seen: set[str] = set()
+        page = 0
+
+        while page < max(1, pages):
+            params: list[tuple[str, str]] = [
+                ("offset", str(page * per_page)),
+                ("limit", str(per_page)),
+                ("sort_by", SORT_PRICE_ASC),
+                ("collection_ids", str(info.get("id"))),
+            ]
+            if model:
+                params.append(("filter_by_models", strip_rarity(model)))
+            params += [
+                ("status", "listed"),
+                ("exclude_bundled", "true"),
+                ("premarket_status", "all"),
+            ]
+
+            for attempt in range(2):
+                await self._wait_slot()
+                response = await self.http.request(
+                    "GET", f"{self.base}/nfts/search", params=params, headers=self._headers()
+                )
+                if response.status == 429 and attempt == 0:
+                    await asyncio.sleep(2.0)
+                    continue
+                break
+
+            if response.status == 429:
+                raise MarketRateLimited("Portals: search rate limited", 2.0)
+            if response.status in (401, 403):
+                raise MarketError(response.status, f"Portals blocked the request: {response.text[:160]}")
+            if response.status >= 400:
+                raise MarketError(response.status, f"Portals /nfts/search: {response.text[:200]}")
+
+            data = response.json() or {}
+            results = data.get("results") if isinstance(data, dict) else []
+            results = results or []
+            fresh = 0
+            for item in results:
+                parsed = self._parse_item(item, info)
+                if parsed is not None and parsed.id not in seen:
+                    seen.add(parsed.id)
+                    out.append(parsed)
+                    fresh += 1
+
+            # A short page means the order book ended; an all-duplicates page
+            # means the API ignored offset and would repeat itself forever.
+            if len(results) < per_page or fresh == 0:
+                break
+            page += 1
+
         return out
 
     def _parse_item(self, item: dict[str, Any], info: dict[str, Any]) -> Listing | None:

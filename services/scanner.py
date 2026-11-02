@@ -121,7 +121,12 @@ class Scanner:
             )
 
         async with self._scan_lock:
-            report, offers = await self._run(queries, notify=False)
+            report, offers = await self._run(
+                queries,
+                notify=False,
+                pages=self.settings.manual_search_pages,
+                per_page=self.settings.manual_search_listings,
+            )
 
         if user is None:
             report.offers = 0
@@ -140,7 +145,14 @@ class Scanner:
 
     # --- internals -------------------------------------------------------------
 
-    async def _run(self, queries: list[dict[str, Any]], *, notify: bool) -> tuple[ScanReport, list[Offer]]:
+    async def _run(
+        self,
+        queries: list[dict[str, Any]],
+        *,
+        notify: bool,
+        pages: int = 1,
+        per_page: int | None = None,
+    ) -> tuple[ScanReport, list[Offer]]:
         started_at = datetime.now(timezone.utc)
         started = time.perf_counter()
         active = {name: adapter for name, adapter in self.adapters.items() if adapter.enabled}
@@ -151,7 +163,9 @@ class Scanner:
         sent = 0
 
         if queries:
-            listings, errors, counts = await self._collect(queries, active)
+            listings, errors, counts = await self._collect(
+                queries, active, pages=pages, per_page=per_page
+            )
             offers = build_offers(
                 listings,
                 self.settings.fees_for,
@@ -185,7 +199,8 @@ class Scanner:
         return report, offers
 
     async def _collect(
-        self, queries: list[dict[str, Any]], adapters: dict[str, BaseAdapter]
+        self, queries: list[dict[str, Any]], adapters: dict[str, BaseAdapter],
+        *, pages: int = 1, per_page: int | None = None,
     ) -> tuple[list[Listing], dict[str, int], dict[str, int]]:
         listings: list[Listing] = []
         errors = {name: 0 for name in adapters}
@@ -195,7 +210,7 @@ class Scanner:
             collection = query["collection"]
             model = query.get("model") or None
             tasks = [
-                self._fetch(name, adapter, collection, model)
+                self._fetch(name, adapter, collection, model, pages=pages, per_page=per_page)
                 for name, adapter in adapters.items()
             ]
             results = await asyncio.gather(*tasks, return_exceptions=True)
@@ -209,12 +224,14 @@ class Scanner:
         return listings, errors, counts
 
     async def _fetch(
-        self, name: str, adapter: BaseAdapter, collection: str, model: str | None
+        self, name: str, adapter: BaseAdapter, collection: str, model: str | None,
+        *, pages: int = 1, per_page: int | None = None,
     ) -> list[Listing]:
-        timeout = max(20.0, self.settings.http_timeout * 3)
+        size = per_page or self.settings.max_listings_per_query
+        timeout = min(300.0, max(20.0, self.settings.http_timeout * 3) * max(1, pages))
         try:
             result = await asyncio.wait_for(
-                adapter.search(collection, model, self.settings.max_listings_per_query),
+                adapter.search(collection, model, size, pages=pages),
                 timeout=timeout,
             )
         except Exception as exc:

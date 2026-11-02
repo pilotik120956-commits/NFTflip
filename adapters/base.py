@@ -133,7 +133,19 @@ class BaseAdapter(ABC):
         return True
 
     @abstractmethod
-    async def search(self, collection: str, model: str | None = None, limit: int = 30) -> list[Listing]:
+    async def search(
+        self,
+        collection: str,
+        model: str | None = None,
+        limit: int = 30,
+        *,
+        pages: int = 1,
+    ) -> list[Listing]:
+        """Return up to ``limit`` listings per page, walking ``pages`` pages deep.
+
+        Manual searches pass a higher ``pages`` to look through more of the
+        order book instead of only the cheapest page.
+        """
         raise NotImplementedError
 
     async def collections(self) -> list[str]:
