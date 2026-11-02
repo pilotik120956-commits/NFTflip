@@ -80,6 +80,7 @@ class Settings:
     night_end_hour: int
     tz_offset_hours: float
     max_listings_per_query: int
+    periodic_scan_pages: int
     manual_search_pages: int
     manual_search_listings: int
     max_watch_queries: int
@@ -195,6 +196,7 @@ def get_settings() -> Settings:
         night_end_hour=_int("NIGHT_END_HOUR", 8, low=0, high=23),
         tz_offset_hours=_float("TZ_OFFSET_HOURS", 2.0),
         max_listings_per_query=_int("MAX_LISTINGS_PER_QUERY", 30, low=5, high=50),
+        periodic_scan_pages=_int("PERIODIC_SCAN_PAGES", 2, low=1, high=10),
         manual_search_pages=_int("MANUAL_SEARCH_PAGES", 8, low=1, high=30),
         manual_search_listings=_int("MANUAL_SEARCH_LISTINGS", 50, low=5, high=50),
         max_watch_queries=_int("MAX_WATCH_QUERIES", 40, low=1, high=200),

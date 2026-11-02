@@ -89,7 +89,11 @@ class Scanner:
     async def scan_once(self) -> tuple[ScanReport, list[Offer]]:
         async with self._scan_lock:
             queries = await self.db.all_watch_queries(self.settings.max_watch_queries)
-            return await self._run(queries, notify=True)
+            return await self._run(
+                queries,
+                notify=True,
+                pages=self.settings.periodic_scan_pages,
+            )
 
     async def scan_adhoc(self, collection: str, model: str | None = None) -> tuple[ScanReport, list[Offer]]:
         """One-off scan without a database watch (used by `python run.py scan`)."""
@@ -251,9 +255,10 @@ class Scanner:
             eligible: list[dict[str, Any]] = []
             for user in users:
                 tg_id = int(user["tg_id"])
+                # Periodic background signals: notify about any positive-margin
+                # arbitrage (even below the user's manual threshold), so the
+                # user learns about "almost profitable" opportunities too.
                 if offer.buy_cost > float(user["budget_ton"]):
-                    continue
-                if offer.margin_pct < float(user["min_margin_pct"]):
                     continue
                 if await self.db.was_sent(tg_id, offer.offer_key, offer.buy.price_ton,
                                           self.settings.signal_cooldown_sec):
