@@ -9,8 +9,9 @@ from aiogram.types import (
     ReplyKeyboardMarkup,
 )
 
-from models import Offer
+from models import Offer, market_name
 
+BTN_SEARCH = "🚀 Почати пошук"
 BTN_STATUS = "📊 Статус"
 BTN_BUDGET = "💰 Бюджет"
 BTN_CALC = "🧮 Калькулятор"
@@ -22,6 +23,7 @@ BTN_HELP = "❓ Допомога"
 def main_menu_kb() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
         keyboard=[
+            [KeyboardButton(text=BTN_SEARCH)],
             [KeyboardButton(text=BTN_STATUS), KeyboardButton(text=BTN_BUDGET)],
             [KeyboardButton(text=BTN_CALC), KeyboardButton(text=BTN_WATCH)],
             [KeyboardButton(text=BTN_SETTINGS), KeyboardButton(text=BTN_HELP)],
@@ -34,6 +36,7 @@ def main_menu_kb() -> ReplyKeyboardMarkup:
 def main_inline_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
+            [InlineKeyboardButton(text="🚀 Почати пошук", callback_data="menu:search")],
             [
                 InlineKeyboardButton(text="📊 Статус", callback_data="menu:status"),
                 InlineKeyboardButton(text="👀 Підписки", callback_data="menu:watch"),
@@ -140,8 +143,16 @@ def calc_cancel_kb() -> InlineKeyboardMarkup:
 
 def offer_kb(offer: Offer) -> InlineKeyboardMarkup:
     keyboard: list[list[InlineKeyboardButton]] = []
-    if offer.link:
-        keyboard.append([InlineKeyboardButton(text="🎁 Відкрити подарунок", url=offer.link)])
+    if offer.buy_url:
+        keyboard.append([
+            InlineKeyboardButton(
+                text=f"🛒 Купити на {market_name(offer.buy.market)}",
+                url=offer.buy_url,
+            )
+        ])
+    tg_page = offer.buy.tg_url
+    if tg_page and tg_page != offer.buy_url:
+        keyboard.append([InlineKeyboardButton(text="🎁 Сторінка подарунка", url=tg_page)])
     buy_thousandths = int(round(offer.buy.price_ton * 1000))
     sell_thousandths = int(round(offer.est_sale * 1000))
     code = {"portals": "p", "tonnel": "t", "mrkt": "m"}.get(offer.buy.market, "p")

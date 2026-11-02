@@ -71,6 +71,45 @@ def offer_text(offer: Offer, display: str = "both", rate: float | None = None,
     return "\n".join(lines)
 
 
+def _clip(text: str, limit: int) -> str:
+    text = " ".join((text or "").split())
+    return text if len(text) <= limit else text[: limit - 1].rstrip() + "…"
+
+
+def offer_caption(offer: Offer, display: str = "both", rate: float | None = None,
+                  discount_pct: float = 3.0) -> str:
+    """Compact card that stays under Telegram's 1024-character caption limit."""
+    number = f" #{offer.number}" if offer.number is not None else ""
+    lines = [
+        "🔥 <b>Вигідна пропозиція</b>",
+        "",
+        f"🎁 <b>{esc(_clip(offer.collection, 90))}{number}</b>",
+        f"🧩 {esc(_clip(offer.buy.traits, 140))}",
+        "",
+        f"🛒 <b>{_mkt(offer.buy.market)}</b>: {fmt_ton(offer.buy.price_ton)} TON "
+        f"+ {fmt_pct(offer.buy_fee_pct)} = <b>{fmt_ton(offer.buy_cost)} TON</b>",
+        f"💸 Продаж ~{fmt_ton(offer.est_sale)} TON → "
+        f"<b>{fmt_ton(offer.resale_net)} TON</b> чистими",
+        f"📈 Прибуток: <b>{fmt_ton(offer.profit)} TON"
+        f"{_usd_suffix(offer.profit, rate, display)}</b>",
+        f"🎯 ROI {fmt_pct(offer.roi_pct)} · маржа {fmt_pct(offer.margin_pct)}"
+        f" · розрив {fmt_pct(offer.gap_pct)}",
+    ]
+    if offer.other_listings:
+        prices = " · ".join(
+            f"{_mkt(other.market)} {fmt_ton(other.price_ton)} TON"
+            for other in offer.other_listings[:2]
+        )
+        lines.append(f"📊 Інші: {prices}")
+    lines += [
+        "",
+        f"ℹ️ Оцінка продажу — найнижча чужа ціна мінус {fmt_pct(discount_pct)}. "
+        "Перевірте лот перед покупкою.",
+    ]
+    caption = "\n".join(lines)
+    return caption if len(caption) <= 1024 else caption[:1020].rstrip() + "…"
+
+
 def calc_text(buy_price: float, sell_price: float, settings: Settings,
               display: str = "both", rate: float | None = None,
               buy_market: str = "portals") -> str:
@@ -273,6 +312,10 @@ def help_text() -> str:
         "<code>/daily 100</code> — денний ліміт, TON\n"
         "<code>/threshold 8</code> — мінімальна маржа, %\n"
         "<code>/calc 5 7</code> — прибуток з урахуванням комісій\n\n"
+        "<b>Пошук</b>\n"
+        "🚀 <b>Почати пошук</b> — кнопка в меню: бот сканує ваші підписки, надсилає "
+        "фото подарунка та пряме посилання на купівлю саме цього лота\n"
+        "<code>/search</code> — те саме командою\n\n"
         "<b>Стан</b>\n"
         "<code>/status</code> — стан сканера\n"
         "<code>/deals</code> — останні сигнали\n"

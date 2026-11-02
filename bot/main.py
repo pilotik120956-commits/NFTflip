@@ -12,9 +12,8 @@ from aiogram.types import BotCommand
 
 from adapters import MrktAdapter, PortalsAdapter, TonnelAdapter
 from bot.context import AppContext
-from bot.formatting import offer_text
+from bot.delivery import send_offer_card
 from bot.handlers import router
-from bot.keyboards import offer_kb
 from bot.middleware import AccessMiddleware, ContextMiddleware
 from config import Settings, get_settings
 from db.database import Database
@@ -71,18 +70,20 @@ async def run_bot(settings: Settings | None = None) -> None:
     dispatcher.include_router(router)
 
     async def on_offer(tg_id: int, offer, user: dict) -> None:
-        text = offer_text(
+        await send_offer_card(
+            bot,
+            tg_id,
             offer,
             display=user.get("display_currency") or "both",
             rate=await rates.get(),
             discount_pct=settings.resale_discount_pct,
         )
-        await bot.send_message(tg_id, text, reply_markup=offer_kb(offer))
 
     scanner.on_offer = on_offer
 
     commands = [
         BotCommand(command="start", description="Головне меню"),
+        BotCommand(command="search", description="Почати пошук вигідних пропозицій"),
         BotCommand(command="add", description="Додати колекцію/модель"),
         BotCommand(command="watch", description="Мої підписки"),
         BotCommand(command="del", description="Видалити підписку"),
@@ -108,7 +109,11 @@ async def run_bot(settings: Settings | None = None) -> None:
             await bot.set_my_commands(commands)
         except Exception as exc:  # noqa: BLE001 - cosmetic, not fatal
             log.warning("Could not set bot commands: %s", exc)
-        await dispatcher.start_polling(bot, allowed_updates=dispatcher.resolve_used_update_types())
+        await dispatcher.start_polling(
+            bot,
+            allowed_updates=dispatcher.resolve_used_update_types(),
+            drop_pending_updates=True,
+        )
     finally:
         log.info("Shutting down…")
         await scanner.stop()

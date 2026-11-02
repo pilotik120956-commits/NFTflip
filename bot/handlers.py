@@ -3,20 +3,22 @@
 from __future__ import annotations
 
 import logging
+import time
 
 from aiogram import F, Router
+from aiogram.exceptions import TelegramBadRequest
 from aiogram.filters import Command, CommandObject, CommandStart, StateFilter
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import CallbackQuery, Message, User
 
 from bot.context import AppContext
+from bot.delivery import send_offer_card
 from bot.formatting import (
     calc_text,
     esc,
     fees_text,
     help_text,
-    offer_text,
     report_text,
     settings_text,
     signal_row_text,
@@ -27,6 +29,7 @@ from bot.keyboards import (
     BTN_BUDGET,
     BTN_CALC,
     BTN_HELP,
+    BTN_SEARCH,
     BTN_SETTINGS,
     BTN_STATUS,
     BTN_WATCH,
@@ -40,11 +43,13 @@ from bot.keyboards import (
     watch_kb,
 )
 from core.calculator import fmt_ton
-from models import market_name
 
 log = logging.getLogger(__name__)
 router = Router(name="nftflip")
 MARKETS = ("portals", "tonnel", "mrkt")
+SEARCH_COOLDOWN_SEC = 15.0
+
+_search_started: dict[int, float] = {}
 
 
 class CalcFlow(StatesGroup):
@@ -87,6 +92,14 @@ def _split_watch(raw: str) -> tuple[str, str | None]:
     else:
         collection, model = raw, ""
     return " ".join(collection.split()), (" ".join(model.split()) or None)
+
+
+async def _ack(cb: CallbackQuery, text: str | None = None, *, show_alert: bool = False) -> None:
+    """Answer a callback query, ignoring expired/invalid query IDs."""
+    try:
+        await cb.answer(text, show_alert=show_alert)
+    except TelegramBadRequest:
+        pass
 
 
 async def _respond(cb: CallbackQuery, text: str, kb=None, *, edit: bool = True) -> None:
@@ -181,6 +194,97 @@ async def _send_deals(target: Message | CallbackQuery, ctx: AppContext, tg: User
         await _respond(target, text, back_kb(), edit=edit)
     else:
         await target.answer(text, reply_markup=back_kb())
+
+
+async def _say(target: Message | CallbackQuery, text: str, kb=None) -> None:
+    """Send a new message whether the trigger was a command or an inline button."""
+    if isinstance(target, CallbackQuery):
+        await target.bot.send_message(target.from_user.id, text, reply_markup=kb)
+    else:
+        await target.answer(text, reply_markup=kb)
+
+
+async def _do_search(target: Message | CallbackQuery, ctx: AppContext, tg: User | None) -> None:
+    """Manual search over the user's own watches, with photo cards and buy links."""
+    if tg is None:
+        return
+    if isinstance(target, CallbackQuery):
+        await _ack(target)
+
+    tg_id = tg.id
+    user = await _ensure_user(ctx, tg)
+    now = time.monotonic()
+    left = SEARCH_COOLDOWN_SEC - (now - _search_started.get(tg_id, 0.0))
+    if left > 0:
+        await _say(
+            target,
+            f"⏳ Пошук уже запускався. Спробуйте ще раз через {int(left) + 1} с.",
+        )
+        return
+
+    watches = await ctx.db.list_watch(tg_id)
+    if not watches:
+        await _say(
+            target,
+            "👀 <b>Немає підписок</b>\n\n"
+            "Пошук працює по ваших підписках. Спершу додайте колекцію:\n"
+            "<code>/add Durov's Cap</code> — всі моделі\n"
+            "<code>/add Toy Bear | Wizard</code> — лише модель\n\n"
+            "Потім натисніть «🚀 Почати пошук» ще раз.",
+            back_kb(),
+        )
+        return
+
+    _search_started[tg_id] = now
+    await _say(
+        target,
+        f"🔍 Сканую {len(watches)} підписок на Portals, Tonnel і MRKT…\n"
+        "Це може зайняти до хвилини.",
+    )
+
+    try:
+        report, offers = await ctx.scanner.scan_for_user(tg_id)
+    except Exception as exc:  # noqa: BLE001 - report instead of leaving the user waiting
+        log.exception("Manual search failed for %s", tg_id)
+        await _say(target, f"⚠️ Пошук не вдався: {esc(exc)}", back_kb())
+        return
+
+    budget = float(user.get("budget_ton") or 0)
+    margin = float(user.get("min_margin_pct") or 0)
+
+    if not offers:
+        await _say(
+            target,
+            report_text(report)
+            + "\n\n😕 Зараз вигідних пропозицій немає.\n"
+            f"Ваші умови: бюджет <b>{fmt_ton(budget)} TON</b>, "
+            f"маржа від <b>{margin:g}%</b>.\n"
+            "Спробуйте пізніше або змініть /budget і /threshold.",
+            back_kb(),
+        )
+        return
+
+    await _say(
+        target,
+        f"🚀 <b>Знайдено {len(offers)} вигідних пропозицій</b>\n\n"
+        f"Бюджет: <b>{fmt_ton(budget)} TON</b> · маржа від <b>{margin:g}%</b>\n"
+        f"Перевірено лотів: {report.listings} · {report.duration_sec:.1f} с\n\n"
+        "Нижче — фото подарунка, назва з номером і пряме посилання на купівлю "
+        "саме цього лота.",
+        back_kb(),
+    )
+
+    rate = await ctx.rates.get()
+    display = user.get("display_currency") or "both"
+    for offer in offers:
+        await send_offer_card(
+            target.bot,
+            tg_id,
+            offer,
+            display=display,
+            rate=rate,
+            discount_pct=ctx.settings.resale_discount_pct,
+        )
 
 
 # --- commands -----------------------------------------------------------------
@@ -487,6 +591,11 @@ async def cmd_scan(message: Message, ctx: AppContext) -> None:
     await message.answer(report_text(report), reply_markup=back_kb())
 
 
+@router.message(Command("search", "find"))
+async def cmd_search(message: Message, ctx: AppContext) -> None:
+    await _do_search(message, ctx, message.from_user)
+
+
 @router.message(Command("id"))
 async def cmd_id(message: Message) -> None:
     await message.answer(f"Ваш Telegram ID: <code>{_uid(message)}</code>")
@@ -498,6 +607,11 @@ async def cmd_id(message: Message) -> None:
 @router.message(StateFilter(None), F.text == BTN_STATUS)
 async def btn_status(message: Message, ctx: AppContext) -> None:
     await _send_status(message, ctx)
+
+
+@router.message(StateFilter(None), F.text == BTN_SEARCH)
+async def btn_search(message: Message, ctx: AppContext) -> None:
+    await _do_search(message, ctx, message.from_user)
 
 
 @router.message(StateFilter(None), F.text == BTN_BUDGET)
@@ -537,66 +651,71 @@ async def btn_help(message: Message, ctx: AppContext) -> None:
 
 @router.callback_query(F.data == "noop")
 async def cb_noop(cb: CallbackQuery) -> None:
-    await cb.answer()
+    await _ack(cb)
 
 
 @router.callback_query(F.data == "menu:main")
 async def cb_main(cb: CallbackQuery, ctx: AppContext) -> None:
     await _ensure_user(ctx, cb.from_user)
     await _respond(cb, "Головне меню:", main_inline_kb())
-    await cb.answer()
+    await _ack(cb)
 
 
 @router.callback_query(F.data == "menu:help")
 async def cb_help(cb: CallbackQuery, ctx: AppContext) -> None:
     await _ensure_user(ctx, cb.from_user)
     await _respond(cb, help_text(), back_kb())
-    await cb.answer()
+    await _ack(cb)
 
 
 @router.callback_query(F.data == "menu:status")
 async def cb_status(cb: CallbackQuery, ctx: AppContext) -> None:
     await _ensure_user(ctx, cb.from_user)
     await _send_status(cb, ctx, edit=True)
-    await cb.answer()
+    await _ack(cb)
+
+
+@router.callback_query(F.data == "menu:search")
+async def cb_search(cb: CallbackQuery, ctx: AppContext) -> None:
+    await _do_search(cb, ctx, cb.from_user)
 
 
 @router.callback_query(F.data == "menu:watch")
 async def cb_watch(cb: CallbackQuery, ctx: AppContext) -> None:
     await _ensure_user(ctx, cb.from_user)
     await _send_watch(cb, ctx, cb.from_user.id, edit=True)
-    await cb.answer()
+    await _ack(cb)
 
 
 @router.callback_query(F.data == "menu:settings")
 async def cb_settings(cb: CallbackQuery, ctx: AppContext) -> None:
     await _send_settings(cb, ctx, cb.from_user, edit=True)
-    await cb.answer()
+    await _ack(cb)
 
 
 @router.callback_query(F.data == "menu:budget")
 async def cb_budget(cb: CallbackQuery, ctx: AppContext) -> None:
     await _send_budget(cb, ctx, cb.from_user, edit=True)
-    await cb.answer()
+    await _ack(cb)
 
 
 @router.callback_query(F.data == "menu:threshold")
 async def cb_threshold(cb: CallbackQuery, ctx: AppContext) -> None:
     await _send_threshold(cb, ctx, cb.from_user, edit=True)
-    await cb.answer()
+    await _ack(cb)
 
 
 @router.callback_query(F.data == "menu:fees")
 async def cb_fees(cb: CallbackQuery, ctx: AppContext) -> None:
     await _ensure_user(ctx, cb.from_user)
     await _respond(cb, fees_text(ctx.settings), back_kb())
-    await cb.answer()
+    await _ack(cb)
 
 
 @router.callback_query(F.data == "menu:deals")
 async def cb_deals(cb: CallbackQuery, ctx: AppContext) -> None:
     await _send_deals(cb, ctx, cb.from_user, edit=True)
-    await cb.answer()
+    await _ack(cb)
 
 
 @router.callback_query(F.data == "menu:calc")
@@ -609,7 +728,7 @@ async def cb_calc(cb: CallbackQuery, state: FSMContext, ctx: AppContext) -> None
         calc_cancel_kb(),
         edit=False,
     )
-    await cb.answer()
+    await _ack(cb)
 
 
 @router.callback_query(F.data == "watch:add")
@@ -624,7 +743,7 @@ async def cb_watch_add(cb: CallbackQuery, ctx: AppContext) -> None:
         back_kb(),
         edit=False,
     )
-    await cb.answer()
+    await _ack(cb)
 
 
 @router.callback_query(F.data.startswith("watch:del:"))
@@ -633,7 +752,7 @@ async def cb_watch_del(cb: CallbackQuery, ctx: AppContext) -> None:
     try:
         watch_id = int((cb.data or "").rsplit(":", 1)[1])
     except (ValueError, IndexError):
-        await cb.answer("Некоректна підписка", show_alert=True)
+        await _ack(cb, "Некоректна підписка", show_alert=True)
         return
     removed = await ctx.db.remove_watch(cb.from_user.id, watch_id)
     rows = await ctx.db.list_watch(cb.from_user.id)
@@ -641,7 +760,7 @@ async def cb_watch_del(cb: CallbackQuery, ctx: AppContext) -> None:
     if not removed:
         text += "\n\n⚠️ Підписку не знайдено — можливо, її вже видалено."
     await _respond(cb, text, watch_kb(rows))
-    await cb.answer("Видалено" if removed else "Не знайдено")
+    await _ack(cb, "Видалено" if removed else "Не знайдено")
 
 
 @router.callback_query(F.data.startswith("bud:"))
@@ -650,11 +769,11 @@ async def cb_set_budget(cb: CallbackQuery, ctx: AppContext) -> None:
     try:
         value = float((cb.data or "").split(":", 1)[1])
     except (ValueError, IndexError):
-        await cb.answer("Некоректне значення", show_alert=True)
+        await _ack(cb, "Некоректне значення", show_alert=True)
         return
     await ctx.db.update_user(cb.from_user.id, budget_ton=value)
     await _send_settings(cb, ctx, cb.from_user, edit=True)
-    await cb.answer(f"Бюджет: {value:g} TON")
+    await _ack(cb, f"Бюджет: {value:g} TON")
 
 
 @router.callback_query(F.data.startswith("thr:"))
@@ -663,11 +782,11 @@ async def cb_set_threshold(cb: CallbackQuery, ctx: AppContext) -> None:
     try:
         value = float((cb.data or "").split(":", 1)[1])
     except (ValueError, IndexError):
-        await cb.answer("Некоректне значення", show_alert=True)
+        await _ack(cb, "Некоректне значення", show_alert=True)
         return
     await ctx.db.update_user(cb.from_user.id, min_margin_pct=value)
     await _send_settings(cb, ctx, cb.from_user, edit=True)
-    await cb.answer(f"Мінімальна маржа: {value:g}%")
+    await _ack(cb, f"Мінімальна маржа: {value:g}%")
 
 
 @router.callback_query(F.data.startswith("cur:"))
@@ -675,11 +794,11 @@ async def cb_currency(cb: CallbackQuery, ctx: AppContext) -> None:
     await _ensure_user(ctx, cb.from_user)
     value = (cb.data or "").split(":", 1)[1]
     if value not in ("both", "ton", "usd"):
-        await cb.answer("Некоректна валюта", show_alert=True)
+        await _ack(cb, "Некоректна валюта", show_alert=True)
         return
     await ctx.db.update_user(cb.from_user.id, display_currency=value)
     await _send_settings(cb, ctx, cb.from_user, edit=True)
-    await cb.answer("Збережено")
+    await _ack(cb, "Збережено")
 
 
 @router.callback_query(F.data == "alerts:toggle")
@@ -688,14 +807,14 @@ async def cb_alerts_toggle(cb: CallbackQuery, ctx: AppContext) -> None:
     enabled = 0 if int(user.get("alerts_enabled") or 0) else 1
     await ctx.db.update_user(cb.from_user.id, alerts_enabled=enabled)
     await _send_settings(cb, ctx, cb.from_user, edit=True)
-    await cb.answer("Сигнали увімкнено" if enabled else "Сигнали вимкнено")
+    await _ack(cb, "Сигнали увімкнено" if enabled else "Сигнали вимкнено")
 
 
 @router.callback_query(F.data == "calc:cancel")
 async def cb_calc_cancel(cb: CallbackQuery, state: FSMContext, ctx: AppContext) -> None:
     await state.clear()
     await _respond(cb, "Скасовано.", main_inline_kb())
-    await cb.answer()
+    await _ack(cb)
 
 
 @router.callback_query(F.data.startswith("c1:"))
@@ -706,7 +825,7 @@ async def cb_recalc(cb: CallbackQuery, ctx: AppContext) -> None:
         buy = int(buy_raw) / 1000
         sell = int(sell_raw) / 1000
     except (ValueError, IndexError):
-        await cb.answer("Не вдалося розрахувати", show_alert=True)
+        await _ack(cb, "Не вдалося розрахувати", show_alert=True)
         return
     buy_market = {"p": "portals", "t": "tonnel", "m": "mrkt"}.get(code, "portals")
     user = await ctx.db.get_user(cb.from_user.id) or {}
@@ -724,7 +843,7 @@ async def cb_recalc(cb: CallbackQuery, ctx: AppContext) -> None:
         back_kb(),
         edit=False,
     )
-    await cb.answer()
+    await _ack(cb)
 
 
 # Any other private text: small nudge instead of silence.

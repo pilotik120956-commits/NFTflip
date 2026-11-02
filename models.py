@@ -58,6 +58,39 @@ class Listing:
         return self.url or self.tg_url
 
     @property
+    def image_url(self) -> str | None:
+        """Preview image: the marketplace CDN field when present, else Fragment."""
+        raw = self.raw or {}
+        for key in (
+            "photo_url",
+            "image_url",
+            "imageUrl",
+            "photoUrl",
+            "image",
+            "photo",
+            "preview_url",
+            "previewUrl",
+            "thumbnail",
+        ):
+            value = raw.get(key)
+            if isinstance(value, str) and value.startswith("http"):
+                return value
+        if self.number is not None and self.collection:
+            return f"https://nft.fragment.com/gift/{slugify(self.collection).lower()}-{self.number}.medium.jpg"
+        return None
+
+    @property
+    def market_url(self) -> str | None:
+        """Deep link to this exact listing on the marketplace where it is sold."""
+        if self.market == "portals":
+            return f"https://t.me/portals_market_bot/market?startapp=gift_{self.id}"
+        if self.market == "tonnel":
+            return f"https://t.me/tonnel_network_bot/gift?startapp={self.id}"
+        if self.market == "mrkt":
+            return f"https://www.mrkt.land/gift/{self.id}"
+        return self.url
+
+    @property
     def title(self) -> str:
         number = f" #{self.number}" if self.number is not None else ""
         return f"{self.collection}{number}"
@@ -111,5 +144,10 @@ class Offer:
         return (self.sell_ask - self.buy.price_ton) / self.sell_ask * 100.0
 
     @property
+    def buy_url(self) -> str | None:
+        """Where the user can actually buy this gift."""
+        return self.buy.market_url or self.buy.link
+
+    @property
     def link(self) -> str | None:
-        return self.buy.tg_url or self.buy.link
+        return self.buy_url

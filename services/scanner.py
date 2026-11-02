@@ -96,6 +96,46 @@ class Scanner:
         queries = [{"collection": collection, "model": model or "", "users": 1}]
         return await self._run(queries, notify=False)
 
+    async def scan_for_user(self, tg_id: int, limit: int = 8) -> tuple[ScanReport, list[Offer]]:
+        """Manual "start search": scan only this user's watches, filter by their limits.
+
+        Does not save signals or mark them as sent, so manual searches never eat into
+        the periodic alert cooldown.
+        """
+        user = await self.db.get_user(tg_id)
+        watches = await self.db.list_watch(tg_id)
+
+        queries: list[dict[str, Any]] = []
+        seen: set[tuple[str, str]] = set()
+        for row in watches:
+            key = (str(row["collection_key"]), str(row.get("model_key") or ""))
+            if key in seen:
+                continue
+            seen.add(key)
+            queries.append(
+                {
+                    "collection": row["collection"],
+                    "model": row.get("model") or "",
+                    "users": 1,
+                }
+            )
+
+        async with self._scan_lock:
+            report, offers = await self._run(queries, notify=False)
+
+        if user is None or not offers:
+            return report, []
+
+        budget = float(user.get("budget_ton") or 0)
+        min_margin = float(user.get("min_margin_pct") or 0)
+        filtered = [
+            offer
+            for offer in offers
+            if offer.buy_cost <= budget and offer.margin_pct >= min_margin
+        ]
+        filtered.sort(key=lambda offer: (offer.profit, offer.margin_pct), reverse=True)
+        return report, filtered[: max(1, limit)]
+
     # --- internals -------------------------------------------------------------
 
     async def _run(self, queries: list[dict[str, Any]], *, notify: bool) -> tuple[ScanReport, list[Offer]]:
